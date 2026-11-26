@@ -128,8 +128,10 @@ overrides:
 # It also points the deb's .desktop Exec at /usr/bin/raft-desktop instead of
 # the quoted "/opt/Raft Desktop/raft-desktop": xdg-open's generic fallback cuts
 # a quoted Exec at the space, so raft:// links opened the browser.
-patchedDependencies:
-  app-builder-lib@26.18.0: patches/app-builder-lib@26.18.0.patch
+# patchedDependencies removed locally: apps/desktop (the only user of
+# app-builder-lib) is not part of the source-available snapshot, and pnpm 12
+# errors on an unused patch (ERR_PNPM_UNUSED_PATCH).
+# To restore: git checkout pnpm-workspace.yaml
 
 # raft-ui ships agent skills. pnpm 10 never installed them; keep that
 # behaviour explicit until someone decides to adopt them.
