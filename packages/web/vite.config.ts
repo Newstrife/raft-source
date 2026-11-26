@@ -3,6 +3,7 @@ import type { Plugin, ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyPwaAppName } from "./scripts/pwaManifestName";
@@ -35,6 +36,17 @@ const devPort = process.env.VITE_DEV_PORT ? Number(process.env.VITE_DEV_PORT) : 
 // Tunnels (cloudflared, ngrok) connect from this machine, so previews still
 // work. Set VITE_DEV_HOST (e.g. `0.0.0.0`) to opt in to LAN access.
 const devHost = process.env.VITE_DEV_HOST?.trim() || "127.0.0.1";
+// Local HTTPS opt-in (LAN exposure): browsers gate crypto.randomUUID /
+// crypto.subtle / clipboard behind the secure context, so plain HTTP on a LAN
+// IP crashes the app. Set VITE_DEV_HTTPS_KEY / VITE_DEV_HTTPS_CERT to serve
+// over HTTPS (e.g. a self-signed cert for the machine's LAN IP).
+const devHttps =
+  process.env.VITE_DEV_HTTPS_KEY && process.env.VITE_DEV_HTTPS_CERT
+    ? {
+        key: readFileSync(process.env.VITE_DEV_HTTPS_KEY),
+        cert: readFileSync(process.env.VITE_DEV_HTTPS_CERT),
+      }
+    : undefined;
 const webRoot = dirname(fileURLToPath(import.meta.url));
 const frontendReleaseIdentity = resolveFrontendReleaseIdentity(process.env);
 const desktopManifestContract = createDesktopManifestContractAdapter(process.env);
@@ -150,6 +162,7 @@ export default defineConfig({
   ],
   server: {
     host: devHost,
+    ...(devHttps ? { https: devHttps } : {}),
     allowedHosts: [".trycloudflare.com", ".loca.lt"],
     port: devPort,
     // Per-commit previews expose this Vite dev server through quick tunnels

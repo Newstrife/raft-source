@@ -3976,6 +3976,14 @@ function cmdStart(args: string[], preview?: PreviewStartHooks): void {
   webCmd += `${envAssign("SLOCK_SERVER_PORT", String(webServerPort))} `;
   webCmd += `${envAssign("VITE_DEV_PORT", String(e.WEB_PORT))} `;
   webCmd += `${envAssign("VITE_DEPLOYMENT_ENV", "slockdev")} `;
+  // Pass-through for LAN exposure (e.g. VITE_DEV_HOST=0.0.0.0); defaults to
+  // loopback like vite.config.ts. Baked inline because tmux windows do not
+  // inherit the launching shell's env.
+  webCmd += `${envAssign("VITE_DEV_HOST", process.env.VITE_DEV_HOST?.trim() || "127.0.0.1")} `;
+  if (process.env.VITE_DEV_HTTPS_KEY && process.env.VITE_DEV_HTTPS_CERT) {
+    webCmd += `${envAssign("VITE_DEV_HTTPS_KEY", process.env.VITE_DEV_HTTPS_KEY)} `;
+    webCmd += `${envAssign("VITE_DEV_HTTPS_CERT", process.env.VITE_DEV_HTTPS_CERT)} `;
+  }
   webCmd += `${envAssign("VITE_SLOCKDEV_ENV_NAME", name)} `;
   webCmd += `${envAssign("VITE_SLOCKDEV_PREVIEW_DESCRIPTION", previewDescription)} `;
   // Opt-in VITE_SLOCKDEV_SKIP_AUTO_LOGIN skips the slockdev auto-login into
