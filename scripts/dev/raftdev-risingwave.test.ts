@@ -414,6 +414,7 @@ test("Postgres Docker args keep the non-CDC shape while adding ownership", () =>
       PG_PORT: 15500,
       POSTGRES_PASSWORD: "dev-secret",
       RISINGWAVE_NETWORK: "unused",
+      PG_DATA_VOLUME: "slock-dev-demo-pg-data",
     }),
     [
       "run", "-d", "--name", "slock-dev-demo-postgres",
@@ -427,10 +428,38 @@ test("Postgres Docker args keep the non-CDC shape while adding ownership", () =>
   );
 });
 
+// keep-data: without the named volume, `docker rm -fv` on stop deletes the
+// image's anonymous pgdata volume together with the container, erasing every
+// record the environment holds.
+test("keep-data Postgres mounts a named pgdata volume that survives rm -fv", () => {
+  const args = postgresDockerRunArgs({
+    CONTAINER: "slock-dev-demo-postgres",
+    PG_PORT: 15500,
+    POSTGRES_PASSWORD: "dev-secret",
+    RISINGWAVE_NETWORK: "unused",
+    PG_DATA_VOLUME: "slock-dev-demo-pg-data",
+  }, false, null, true);
+  assert.ok(args.includes("-v"), args.join(" "));
+  assert.ok(args.includes("slock-dev-demo-pg-data:/var/lib/postgresql/data"), args.join(" "));
+  assert.deepEqual(postgresDockerRunArgs({
+    CONTAINER: "slock-dev-demo-postgres",
+    PG_PORT: 15500,
+    POSTGRES_PASSWORD: "dev-secret",
+    RISINGWAVE_NETWORK: "unused",
+    PG_DATA_VOLUME: "slock-dev-demo-pg-data",
+  }), postgresDockerRunArgs({
+    CONTAINER: "slock-dev-demo-postgres",
+    PG_PORT: 15500,
+    POSTGRES_PASSWORD: "dev-secret",
+    RISINGWAVE_NETWORK: "unused",
+    PG_DATA_VOLUME: "slock-dev-demo-pg-data",
+  }, false, null, false));
+});
+
 // #raft-architecture:#34: `raft-computer leftovers` shows each container's owner by this label.
 test("containers an agent creates carry its id as a label; none without one", () => {
   const agent = "5e4d3c2b-1a0f-4e9d-8c7b-6a5f4e3d2c1b";
-  const env = { CONTAINER: "slock-dev-demo-postgres", PG_PORT: 15500, POSTGRES_PASSWORD: "dev-secret", RISINGWAVE_NETWORK: "unused" };
+  const env = { CONTAINER: "slock-dev-demo-postgres", PG_PORT: 15500, POSTGRES_PASSWORD: "dev-secret", RISINGWAVE_NETWORK: "unused", PG_DATA_VOLUME: "slock-dev-demo-pg-data" };
   const labelled = postgresDockerRunArgs(env, false, agent);
   assert.deepEqual(labelled.slice(0, 8), [
     "run", "-d", "--name", "slock-dev-demo-postgres",
@@ -456,6 +485,7 @@ test("full Postgres Docker args enable bounded logical replication on the shared
       PG_PORT: 15500,
       POSTGRES_PASSWORD: "dev-secret",
       RISINGWAVE_NETWORK: "slock-dev-demo-risingwave-net",
+      PG_DATA_VOLUME: "slock-dev-demo-pg-data",
     }, true),
     [
       "run", "-d", "--name", "slock-dev-demo-postgres",

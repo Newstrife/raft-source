@@ -15,6 +15,10 @@ cd "$(dirname "$0")"
 export PATH="/home/edward/.local/share/mise/installs/node/24.22.3/bin:/home/edward/.local/bin:$PATH"
 
 export SLOCKDEV_IDLE_TTL_SECONDS=0
+# Survive stop/start with the environment's data: Postgres moves to a named
+# volume and stop preserves it plus the RustFS attachments volume and the seed
+# file (the next start skips seeding). `./raftdev nuke` still removes everything.
+export SLOCKDEV_KEEP_DATA=1
 export VITE_DEV_HOST=0.0.0.0
 export VITE_DEV_HTTPS_KEY="$PWD/.slockdev/certs/key.pem"
 export VITE_DEV_HTTPS_CERT="$PWD/.slockdev/certs/cert.pem"

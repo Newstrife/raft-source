@@ -180,7 +180,8 @@ interface Env {
   CONTAINER: string; REDIS_CONTAINER: string; RUSTFS_CONTAINER: string; OTELCOL_CONTAINER: string;
   RISINGWAVE_CONTAINER: string;
   RISINGWAVE_NETWORK: string;
-  RUSTFS_VOLUME: string; TMUX_SESSION: string; SEED_FILE: string;
+  RUSTFS_VOLUME: string; PG_DATA_VOLUME: string; TMUX_SESSION: string; SEED_FILE: string;
+  KEEP_DATA_FILE: string;
   SLOCKDEV_DIR: string; SLOCK_HOME: string; ACTIVITY_FILE: string; IDLE_TTL_FILE: string;
   RISINGWAVE_DSN_FILE: string; RISINGWAVE_STATE_FILE: string; TUNNEL_STATE_FILE: string;
   POSTGRES_PASSWORD: string; JWT_SECRET: string;
@@ -450,6 +451,7 @@ export interface PostgresDockerEnv {
   PG_PORT: number;
   POSTGRES_PASSWORD: string;
   RISINGWAVE_NETWORK: string;
+  PG_DATA_VOLUME: string;
 }
 
 export type RisingWaveReadinessResult = "ready" | "container-exited" | "timeout";
@@ -545,12 +547,16 @@ export function risingWaveDockerRunArgs(
   ];
 }
 
-export function postgresDockerRunArgs(e: PostgresDockerEnv, cdcEnabled = false, agentId: string | null = null): string[] {
+// keepData mounts a named volume for /var/lib/postgresql/data. Without it the
+// image creates an anonymous volume, which `docker rm -fv` deletes together
+// with the container: every stop then erases the environment's records.
+export function postgresDockerRunArgs(e: PostgresDockerEnv, cdcEnabled = false, agentId: string | null = null, keepData = false): string[] {
   return [
     "run", "-d", "--name", e.CONTAINER,
     "--label", RAFTDEV_MANAGED_LABEL_ARG,
     ...raftdevAgentLabelArgs(agentId),
     ...(cdcEnabled ? ["--network", e.RISINGWAVE_NETWORK] : []),
+    ...(keepData ? ["-v", `${e.PG_DATA_VOLUME}:/var/lib/postgresql/data`] : []),
     "-e", "POSTGRES_DB=slock",
     "-e", "POSTGRES_USER=postgres",
     "-e", `POSTGRES_PASSWORD=${e.POSTGRES_PASSWORD}`,
@@ -650,6 +656,12 @@ function setupEnv(name: string): Env {
     RISINGWAVE_CONTAINER: `slock-dev-${name}-risingwave`,
     RISINGWAVE_NETWORK: `slock-dev-${name}-risingwave-net`,
     RUSTFS_VOLUME: `slock-dev-${name}-rustfs-data`,
+    // keep-data (SLOCKDEV_KEEP_DATA=1): Postgres moves to this named volume so
+    // `docker rm -fv` on stop cannot take the data with it (anonymous volumes
+    // die with the container; named ones survive). The marker file records the
+    // opt-in for later `stop` invocations, which are separate processes.
+    PG_DATA_VOLUME: `slock-dev-${name}-pg-data`,
+    KEEP_DATA_FILE: join(SLOCKDEV_DIR, "keep-data"),
     TMUX_SESSION: `slock-${name}`,
     SEED_FILE: join(PROJECT_DIR, `.dev-env-${name}.json`),
     SLOCKDEV_DIR,
@@ -1641,6 +1653,11 @@ Optional:
   uploads pass attestation against it (the only cross-process secret).
   Set SLOCKDEV_HOME=/path/to/home to intentionally override the isolated
   SLOCK_HOME used by the spawned dev processes.
+  Set SLOCKDEV_KEEP_DATA=1 to survive stop/start with the environment's data:
+  Postgres moves to a named volume (slock-dev-<name>-pg-data), and stop
+  preserves it plus the RustFS attachments volume and the seed file; the next
+  start detects the seeded database and skips seeding. "nuke" still removes
+  everything.
   Preview environments auto-stop after 1 hour with no real user API activity.
   User API requests refresh the timer; health checks, CORS preflight, and
   /internal daemon/background traffic do not. Set SLOCKDEV_IDLE_TTL_SECONDS=0
@@ -1785,7 +1802,7 @@ function cmdStatus(): void {
     }
   }
   for (const volumeName of volumeNames) {
-    const match = volumeName.match(/^slock-dev-(.+)-rustfs-data$/);
+    const match = volumeName.match(/^slock-dev-(.+)-(?:rustfs|pg)-data$/);
     if (!match || !dockerVolumeIsRaftdevManaged(volumeName)) continue;
     try {
       validateEnvironmentName(match[1]);
@@ -2436,6 +2453,9 @@ function cmdStop(name: string): void {
   const risingWaveState = readRisingWaveState(e);
   const baseOwnershipProof = risingWaveState?.mode === "local" ||
     hasSeededEnvironmentOwnershipProof(e);
+  // keep-data launches recorded the opt-in in this marker file at start; the
+  // env var alone would not reach this later, separate process.
+  const keepData = existsSync(e.KEEP_DATA_FILE);
   let cleanupFailed = false;
   out(`=== Stopping dev environment: ${name} ===`);
   // The tunnel `start` opened is detached from tmux, so it outlives the
@@ -2513,7 +2533,9 @@ function cmdStop(name: string): void {
   }
   const vols = volumeList.stdout.split("\n");
   if (vols.includes(e.RUSTFS_VOLUME)) {
-    if (!dockerVolumeIsRaftdevManaged(e.RUSTFS_VOLUME) && !baseOwnershipProof) {
+    if (keepData) {
+      out(`Volume '${e.RUSTFS_VOLUME}' preserved (keep-data).`);
+    } else if (!dockerVolumeIsRaftdevManaged(e.RUSTFS_VOLUME) && !baseOwnershipProof) {
       out(`Unowned volume '${e.RUSTFS_VOLUME}' preserved.`);
     } else if (sh("docker", ["volume", "rm", e.RUSTFS_VOLUME], { quiet: true }).code === 0) {
       out(`Volume '${e.RUSTFS_VOLUME}' removed.`);
@@ -2522,12 +2544,15 @@ function cmdStop(name: string): void {
       out(`ERROR: Failed to remove volume '${e.RUSTFS_VOLUME}'.`);
     }
   }
+  if (keepData && vols.includes(e.PG_DATA_VOLUME)) {
+    out(`Volume '${e.PG_DATA_VOLUME}' preserved (keep-data).`);
+  }
   if (cleanupFailed) {
     out("ERROR: Cleanup was incomplete; seed, credential, and ownership state files were preserved for retry.");
     process.exitCode = 1;
     return;
   }
-  if (existsSync(e.SEED_FILE)) {
+  if (existsSync(e.SEED_FILE) && !keepData) {
     rmSync(e.SEED_FILE, { force: true });
     out(`Removed ${e.SEED_FILE}`);
   }
@@ -2562,6 +2587,7 @@ function cmdNuke(): void {
       legacyManagedContainers.add(container);
     }
     legacyManagedVolumes.add(e.RUSTFS_VOLUME);
+    legacyManagedVolumes.add(e.PG_DATA_VOLUME);
   };
 
   // Seed files and validated state files are the migration proof for resources
@@ -2657,7 +2683,7 @@ function cmdNuke(): void {
     cleanupFailed = true;
     out("ERROR: Failed to enumerate Docker volumes.");
   }
-  const volumes = volumeList.stdout.split("\n").filter((v) => /^slock-dev-.*-rustfs-data$/.test(v));
+  const volumes = volumeList.stdout.split("\n").filter((v) => /^slock-dev-.*-(?:rustfs|pg)-data$/.test(v));
   for (const v of volumes) {
     if (!dockerVolumeIsRaftdevManaged(v) && !legacyManagedVolumes.has(v)) {
       out(`Preserved unowned volume: ${v}`);
@@ -3531,6 +3557,15 @@ function cmdStart(args: string[], preview?: PreviewStartHooks): void {
   }
 
   // PostgreSQL container
+  // keep-data: SLOCKDEV_KEEP_DATA=1 opts this launch into surviving stop/start
+  // with its data; the marker file (not the env) records the choice for later
+  // `stop` runs. Existing containers keep their old mounts via `docker start`.
+  const keepData = existsSync(e.KEEP_DATA_FILE) || process.env.SLOCKDEV_KEEP_DATA === "1";
+  if (process.env.SLOCKDEV_KEEP_DATA === "1" && !existsSync(e.KEEP_DATA_FILE)) {
+    mkdirSync(e.SLOCKDEV_DIR, { recursive: true });
+    writeFileSync(e.KEEP_DATA_FILE, "\n");
+    out(`keep-data enabled: Postgres data persists in volume ${e.PG_DATA_VOLUME} across stop/start.`);
+  }
   if (dockerNameExists(e.CONTAINER)) {
     out(`Starting existing container ${e.CONTAINER}...`);
     sh("docker", ["start", e.CONTAINER], { quiet: true });
@@ -3538,7 +3573,7 @@ function cmdStart(args: string[], preview?: PreviewStartHooks): void {
   } else {
     out(`Creating PostgreSQL container ${e.CONTAINER}...`);
     const launch = sh("docker", withDockerMemoryCap(
-      postgresDockerRunArgs(e, risingWaveFull, raftdevCallerAgentId()),
+      postgresDockerRunArgs(e, risingWaveFull, raftdevCallerAgentId(), keepData),
       preview ? PREVIEW_DOCKER_MEMORY_CAPS.postgres : undefined,
     ), { quiet: true });
     preview?.containerCreated(e.CONTAINER);
@@ -3722,40 +3757,48 @@ function cmdStart(args: string[], preview?: PreviewStartHooks): void {
     process.exit(1);
   }
 
-  out("Seeding test data...");
-  if (preview) {
-    // The seed file holds the machine key and (with agent runs) the random
-    // password; create it owner-only so the seed's write keeps that mode.
-    writeFileSync(e.SEED_FILE, "", { mode: 0o600 });
-    chmodSync(e.SEED_FILE, 0o600);
+  let r: { status: number | null };
+  if (keepData && existsSync(e.SEED_FILE)) {
+    // keep-data: the volume survived the last stop and the seed file proves it
+    // was seeded (and still holds the machine key the daemon needs). Migrations
+    // above already applied pending steps; skip seeding so user records keep.
+    out("keep-data: existing Postgres data detected; skipping seed.");
+  } else {
+    out("Seeding test data...");
+    if (preview) {
+      // The seed file holds the machine key and (with agent runs) the random
+      // password; create it owner-only so the seed's write keeps that mode.
+      writeFileSync(e.SEED_FILE, "", { mode: 0o600 });
+      chmodSync(e.SEED_FILE, 0o600);
+    }
+    const seedPasswordEnv = Object.fromEntries(previewSeedPasswordEnv({
+      preview: preview !== undefined,
+      withAgentRuns,
+      randomPassword: () => randomBytes(18).toString("base64url"),
+    }));
+    r = spawnSync(packageManagerCommand("pnpm"), buildDevSeedArgs(e.SEED_FILE, withOnboarding, withAgentRuns), {
+      cwd: join(PROJECT_DIR, "packages/server"),
+      env: {
+        ...process.env,
+        ...seedPasswordEnv,
+        DATABASE_URL: e.DATABASE_URL,
+        S3_ENDPOINT: e.S3_ENDPOINT,
+        S3_REGION: "us-east-1",
+        S3_FORCE_PATH_STYLE: "true",
+        S3_ACCESS_KEY_ID: e.RUSTFS_ACCESS_KEY,
+        S3_SECRET_ACCESS_KEY: e.RUSTFS_SECRET_KEY,
+        S3_ATTACHMENTS_BUCKET: e.RUSTFS_BUCKET,
+        S3_CDN_BUCKET: e.RUSTFS_BUCKET,
+      },
+      stdio: "inherit",
+      shell: packageManagerSpawnShell(),
+    });
+    if ((r.status ?? 1) !== 0) {
+      updateRisingWaveStatus("failed");
+      process.exit(r.status ?? 1);
+    }
+    out("Seed data ready.");
   }
-  const seedPasswordEnv = Object.fromEntries(previewSeedPasswordEnv({
-    preview: preview !== undefined,
-    withAgentRuns,
-    randomPassword: () => randomBytes(18).toString("base64url"),
-  }));
-  let r = spawnSync(packageManagerCommand("pnpm"), buildDevSeedArgs(e.SEED_FILE, withOnboarding, withAgentRuns), {
-    cwd: join(PROJECT_DIR, "packages/server"),
-    env: {
-      ...process.env,
-      ...seedPasswordEnv,
-      DATABASE_URL: e.DATABASE_URL,
-      S3_ENDPOINT: e.S3_ENDPOINT,
-      S3_REGION: "us-east-1",
-      S3_FORCE_PATH_STYLE: "true",
-      S3_ACCESS_KEY_ID: e.RUSTFS_ACCESS_KEY,
-      S3_SECRET_ACCESS_KEY: e.RUSTFS_SECRET_KEY,
-      S3_ATTACHMENTS_BUCKET: e.RUSTFS_BUCKET,
-      S3_CDN_BUCKET: e.RUSTFS_BUCKET,
-    },
-    stdio: "inherit",
-    shell: packageManagerSpawnShell(),
-  });
-  if ((r.status ?? 1) !== 0) {
-    updateRisingWaveStatus("failed");
-    process.exit(r.status ?? 1);
-  }
-  out("Seed data ready.");
 
   if (risingWaveFull) {
     out("Bootstrapping managed RisingWave CDC and materialized-view graph...");
