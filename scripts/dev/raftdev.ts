@@ -2773,7 +2773,7 @@ function startCloudflaredTunnel(
   const logFd = openSync(logFile, "a");
   const child = spawn(
     "cloudflared",
-    ["tunnel", "--url", `http://localhost:${e.WEB_PORT}`, "--no-autoupdate", "--protocol", "http2"],
+    ["tunnel", "--url", process.env.SLOCKDEV_TUNNEL_ORIGIN || `${process.env.VITE_DEV_HTTPS_CERT ? "https" : "http"}://localhost:${e.WEB_PORT}`, "--no-autoupdate", "--protocol", "http2"],
     { detached: true, stdio: ["ignore", logFd, logFd], env: serviceSpawnEnv(process.env, serviceEnvDir) },
   );
   child.unref();
